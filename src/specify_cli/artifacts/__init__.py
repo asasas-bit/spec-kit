@@ -22,7 +22,6 @@ from .._assets import _locate_shared_asset_dir
 from .._identifier import (
     PROJECT_OVERRIDE_LAYER,
     IdentifierComponentError,
-    derive_hook_id,
     derive_public_id,
     is_dotted_command_name,
     layer_kind_from_lookup_id,
