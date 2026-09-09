@@ -428,10 +428,7 @@ def _iter_hook_contributions(
     from ..extensions import ExtensionManager, ExtensionManifest, ValidationError
     from ..presets import PresetManager, PresetResolver  # lazy: avoids circular import
 
-    try:
-        resolver = PresetResolver(project_root)
-    except OSError:
-        return
+    resolver = PresetResolver(project_root)
 
     counter = 0
 
@@ -1038,12 +1035,18 @@ class ArtifactCatalog:
         _validate_preset_registry(self.project_root)
 
         from ..extensions import DEFAULT_HOOK_PRIORITY, HookExecutor, normalize_priority
+        from ..presets import PresetError
 
         grouped: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
-        for idx, contribution in _iter_hook_contributions(self.project_root):
-            event_name = str(contribution.get("eventName", ""))
-            command = str(contribution.get("command", ""))
-            grouped.setdefault((event_name, command), []).append((idx, contribution))
+        try:
+            for idx, contribution in _iter_hook_contributions(self.project_root):
+                event_name = str(contribution.get("eventName", ""))
+                command = str(contribution.get("command", ""))
+                grouped.setdefault((event_name, command), []).append(
+                    (idx, contribution)
+                )
+        except (OSError, PresetError) as exc:
+            raise ArtifactResolutionError() from exc
 
         hook_executor = HookExecutor(self.project_root)
 
@@ -1053,9 +1056,12 @@ class ArtifactCatalog:
 
         for (event_name, command), contributions in grouped.items():
             if event_name not in enabled_hooks_by_event:
-                enabled_hooks_by_event[event_name] = hook_executor.get_hooks_for_event(
-                    event_name
-                )
+                try:
+                    enabled_hooks_by_event[event_name] = (
+                        hook_executor.get_hooks_for_event(event_name)
+                    )
+                except (OSError, PresetError) as exc:
+                    raise ArtifactResolutionError() from exc
             enabled_bindings = enabled_hooks_by_event[event_name]
             stack_entries = _build_hook_stack(contributions, enabled_bindings)
             stack_cache[(event_name, command)] = stack_entries

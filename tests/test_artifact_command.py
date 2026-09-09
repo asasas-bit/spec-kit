@@ -1753,6 +1753,32 @@ class TestHookRegisteredFlag:
         assert hook_row["registered"] is False
 
 
+class TestHookResolutionErrors:
+    @pytest.mark.parametrize("failure_point", ["construction", "iteration"])
+    def test_resolver_oserror_uses_artifact_resolution_error(
+        self,
+        spec_kit_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_point: str,
+    ):
+        from specify_cli.presets import PresetResolver
+
+        def raise_oserror(*_args, **_kwargs):
+            raise OSError("simulated resolver failure")
+
+        if failure_point == "construction":
+            monkeypatch.setattr(PresetResolver, "__init__", raise_oserror)
+        else:
+            monkeypatch.setattr(
+                PresetResolver, "iter_extensions_by_priority", raise_oserror
+            )
+
+        with pytest.raises(ArtifactResolutionError):
+            ArtifactCatalog(spec_kit_project).get_artifact_info(
+                "hook:before_specify:missing.cmd"
+            )
+
+
 class TestHookPerContributorFields:
     """US4 — per-contributor priority and optional visible on each stack entry."""
 
