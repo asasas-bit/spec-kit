@@ -71,7 +71,7 @@ Prints the full inventory of every visible artifact — one row per `(kind, name
 | `description` | Description from the highest-precedence layer that declares one, else `""` |
 | `stack`       | Composition stack for this artifact, using the same row shape as `artifact info` |
 
-Hook rows carry additional top-level scalar fields that mirror the priority-sorted winner of the composition stack — see [Hook artifacts](#hook-artifacts) below.
+Hook rows carry additional fields describing their event, command, and runtime registration state — see [Hook artifacts](#hook-artifacts) below.
 
 Built-in artifacts always appear, even when nothing overrides them. Descriptions come from the highest-priority layer that has one — a preset or project override that hides a built-in command reports its own description, not the hidden built-in text. Skills (`.github/skills/**/SKILL.md`) are excluded: they are integration-specific output, not a shipped asset family.
 
@@ -158,19 +158,27 @@ Hook rows extend the shape above with a few fields that only apply to hooks. A h
   "description": "Compliance pre-check guard",
   "eventName": "before_specify",
   "targetCommand": "speckit.compliance.pre-check",
-  "optional": false,
-  "priority": 5,
   "registered": true,
   "stack": [
     {
       "id": "hook:before_specify:speckit.compliance.pre-check",
       "layer": "extension",
-      "sourceId": "compliance",
-      "strategy": "replace",
+      "sourceId": "compliance-fast",
+      "strategy": "additive",
       "active": true,
-      "lookupId": "extension:compliance:hook:before_specify:speckit.compliance.pre-check",
+      "lookupId": "extension:compliance-fast:hook:before_specify:speckit.compliance.pre-check",
       "priority": 5,
       "optional": false
+    },
+    {
+      "id": "hook:before_specify:speckit.compliance.pre-check",
+      "layer": "extension",
+      "sourceId": "compliance-audit",
+      "strategy": "additive",
+      "active": true,
+      "lookupId": "extension:compliance-audit:hook:before_specify:speckit.compliance.pre-check",
+      "priority": 10,
+      "optional": true
     }
   ]
 }
@@ -182,30 +190,28 @@ Hook rows extend the shape above with a few fields that only apply to hooks. A h
 | --------------- | ----------------------------------------------------------------------------------------------- |
 | `eventName`     | The event whose fires trigger this hook (`before_specify`, `after_plan`, …)                     |
 | `targetCommand` | The command the hook proposes to run when the event fires                                        |
-| `optional`      | Mirrors the active winner's `optional` scalar — the value the runtime will actually see          |
-| `priority`      | Mirrors the active winner's `priority` scalar                                                    |
-| `registered`    | `true` when a matching `.specify/extensions.yml` binding exists and is not `enabled: false`      |
+| `registered`    | `true` when at least one matching `.specify/extensions.yml` binding is enabled                   |
 
-`optional` and `priority` on the row always agree with the entry marked `active: true` on the stack — they are the values the runtime will actually execute for this `(eventName, targetCommand)` pair. Per-contributor `priority` / `optional` remain visible on every stack entry so callers can audit why one contributor won.
+There are no row-level `optional` or `priority` fields because hooks do not have a single winner. Those values remain on each stack entry, where they describe that contributor's runtime binding.
 
 ### Hook stack entries
 
-Hook stack entries drop `presetId`, `presetName`, `hidden`, and `manifestPath` (all of which are meaningless for hooks) and add per-contributor `priority` and `optional`. `strategy` is always `"replace"` — the runtime has no composable hook-strategy vocabulary today, so the field is present for shape parity but carries no semantics beyond "this hook overrides earlier hooks in the same slot".
+Hook stack entries drop `presetId`, `presetName`, `hidden`, and `manifestPath` (all of which are meaningless for hooks) and add per-contributor `priority` and `optional`. Hooks execute additively across extensions: priority determines execution order, but it does not suppress a lower-priority declaration. The stack mirrors that behavior by retaining every contributor in runtime order.
 
 | Field       | Description                                                                                 |
 | ----------- | -------------------------------------------------------------------------------------------- |
 | `id`        | The row-shorthand `hook:{eventName}:{targetCommand}`, identical on every entry               |
 | `layer`     | Always `preset` or `extension` (never `null`, never `project`, never the built-in tier)      |
 | `sourceId`  | The contributing pack's manifest id                                                          |
-| `strategy`  | Always `"replace"` — see note above                                                          |
-| `active`    | `true` only on the priority-sorted winner (index `0`)                                        |
+| `strategy`  | Always `"additive"` because enabled contributors all execute                                |
+| `active`    | Whether this contributor has a matching enabled runtime binding; multiple entries may be `true` |
 | `lookupId`  | The manifest identifier: `{layer}:{sourceId}:hook:{eventName}:{targetCommand}`               |
-| `priority`  | Per-contributor priority (ascending = higher precedence; falls back to the runtime default)  |
+| `priority`  | Per-contributor priority (ascending = earlier execution; falls back to the runtime default)  |
 | `optional`  | Per-contributor optional flag                                                                |
 
 ### `registered` semantics
 
-`registered` reflects the project's runtime binding state under `.specify/extensions.yml` and MUST match the runtime's own execution decision. It is `true` when at least one entry in the event's binding array (a) names one of the row's contributing sources via `extension` and (b) is not explicitly `enabled: false`. A binding entry with a matching `extension` but no `command` field counts as a wildcard — same rule the runtime's `enable_hooks` / `disable_hooks` apply.
+`registered` reflects the project's runtime binding state under `.specify/extensions.yml` and MUST match the runtime's own execution decision. Each stack entry is independently `active` when an entry in the event's binding array (a) names that contributor via `extension`, (b) matches the command or omits it, and (c) is not explicitly `enabled: false`. Top-level `registered` is `true` when any stack entry is active. This mirrors the runtime: `HookExecutor.get_hooks_for_event` returns every enabled entry, sorted by priority.
 
 A declared hook whose contributors have **no** matching binding entry still appears in the inventory with `registered: false`. This is intentional: `artifact list --json` describes what an extension declares, and `registered` tells you whether the runtime will actually invoke it. A structurally invalid `.specify/extensions.yml` (parse error, wrong top-level type, missing `hooks:` key) is silently normalized to an empty bindings map — every declared hook then reports `registered: false` and no error is raised to callers.
 
@@ -217,7 +223,7 @@ Runtime bindings under `.specify/extensions.yml` that name an extension or comma
 
 ### Sort order
 
-Hooks appear after all `command` / `template` / `script` rows in `artifact list --json`. Within the hook block, rows are sorted primarily by `eventName` (alphabetical) and secondarily by the winner's `priority` (ascending). Two rows in the same event at the same priority preserve their original insertion order — matching the runtime's stable-sort tiebreak in `HookExecutor.get_hooks_for_event`.
+Hooks appear after all `command` / `template` / `script` rows in `artifact list --json`. Within the hook block, rows are sorted primarily by `eventName` (alphabetical) and secondarily by the first stack entry's execution priority (ascending). Stack entries themselves use the runtime order: priority ascending, with original insertion order preserved for ties.
 
 ## JSON Errors
 

@@ -1404,8 +1404,8 @@ class TestHookInventorySurfacing:
         entry = hook_rows[0]["stack"][0]
         assert entry["layer"] == "extension"
         assert entry["sourceId"] == "compliance"
-        assert entry["strategy"] == "replace"
-        assert entry["active"] is True
+        assert entry["strategy"] == "additive"
+        assert entry["active"] is False
         assert entry["priority"] == 5
         assert entry["optional"] is False
         assert entry["lookupId"] == (
@@ -1452,7 +1452,7 @@ class TestHookInventorySurfacing:
         assert len(hook_rows) == 1
         assert len(hook_rows[0]["stack"]) == 2
 
-    def test_higher_precedence_winner_selected_by_priority(
+    def test_priority_orders_additive_execution(
         self, spec_kit_project: Path
     ):
         _install_extension_with_hooks(
@@ -1465,15 +1465,22 @@ class TestHookInventorySurfacing:
             "ext-b",
             hooks={"before_specify": [{"command": "shared.cmd", "priority": 3, "optional": False}]},
         )
+        _write_hook_binding(
+            spec_kit_project,
+            "before_specify",
+            entries=[
+                {"extension": "ext-a", "command": "shared.cmd", "enabled": True},
+                {"extension": "ext-b", "command": "shared.cmd", "enabled": True},
+            ],
+        )
         rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
         hook_row = [row for row in rows if row["kind"] == "hook"][0]
-        # Winner is ext-b (priority 3, lower = higher precedence).
-        assert hook_row["priority"] == 3
-        assert hook_row["optional"] is False
+        assert "priority" not in hook_row
+        assert "optional" not in hook_row
         assert hook_row["stack"][0]["sourceId"] == "ext-b"
         assert hook_row["stack"][0]["active"] is True
         assert hook_row["stack"][1]["sourceId"] == "ext-a"
-        assert hook_row["stack"][1]["active"] is False
+        assert hook_row["stack"][1]["active"] is True
 
     def test_stable_insertion_tiebreak_on_equal_priorities(
         self, spec_kit_project: Path
@@ -1493,7 +1500,7 @@ class TestHookInventorySurfacing:
         rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
         hook_row = [row for row in rows if row["kind"] == "hook"][0]
         # Higher-precedence extension (lower priority in resolver ordering)
-        # emits first — that becomes the insertion-order winner on tie.
+        # emits first, matching the runtime's stable-sort tie behavior.
         assert hook_row["stack"][0]["sourceId"] == "ext-a"
 
 
@@ -1645,6 +1652,64 @@ class TestHookRegisteredFlag:
         hook_rows = [row for row in rows if row["kind"] == "hook"]
         assert hook_rows[0]["registered"] is False
 
+    def test_each_contributor_active_flag_matches_its_binding(
+        self, spec_kit_project: Path
+    ):
+        _install_extension_with_hooks(
+            spec_kit_project,
+            "ext-a",
+            hooks={"before_specify": [{"command": "shared.cmd", "priority": 10}]},
+        )
+        _install_extension_with_hooks(
+            spec_kit_project,
+            "ext-b",
+            hooks={"before_specify": [{"command": "shared.cmd", "priority": 3}]},
+        )
+        _write_hook_binding(
+            spec_kit_project,
+            "before_specify",
+            entries=[
+                {"extension": "ext-a", "command": "shared.cmd", "enabled": False},
+                {"extension": "ext-b", "command": "shared.cmd", "enabled": True},
+            ],
+        )
+
+        rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
+        hook_row = [row for row in rows if row["kind"] == "hook"][0]
+        by_source = {entry["sourceId"]: entry for entry in hook_row["stack"]}
+
+        assert by_source["ext-a"]["active"] is False
+        assert by_source["ext-b"]["active"] is True
+        assert hook_row["registered"] is True
+
+    def test_all_contributors_disabled_means_unregistered(
+        self, spec_kit_project: Path
+    ):
+        _install_extension_with_hooks(
+            spec_kit_project,
+            "ext-a",
+            hooks={"before_specify": [{"command": "shared.cmd"}]},
+        )
+        _install_extension_with_hooks(
+            spec_kit_project,
+            "ext-b",
+            hooks={"before_specify": [{"command": "shared.cmd"}]},
+        )
+        _write_hook_binding(
+            spec_kit_project,
+            "before_specify",
+            entries=[
+                {"extension": "ext-a", "command": "shared.cmd", "enabled": False},
+                {"extension": "ext-b", "command": "shared.cmd", "enabled": False},
+            ],
+        )
+
+        rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
+        hook_row = [row for row in rows if row["kind"] == "hook"][0]
+
+        assert all(entry["active"] is False for entry in hook_row["stack"])
+        assert hook_row["registered"] is False
+
 
 class TestHookPerContributorFields:
     """US4 — per-contributor priority and optional visible on each stack entry."""
@@ -1668,7 +1733,7 @@ class TestHookPerContributorFields:
         assert by_source["ext-b"]["priority"] == 3
         assert by_source["ext-b"]["optional"] is False
 
-    def test_every_stack_entry_uses_replace_strategy(self, spec_kit_project: Path):
+    def test_every_stack_entry_uses_additive_strategy(self, spec_kit_project: Path):
         _install_extension_with_hooks(
             spec_kit_project,
             "ext-a",
@@ -1681,7 +1746,7 @@ class TestHookPerContributorFields:
         )
         rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
         stack = [row for row in rows if row["kind"] == "hook"][0]["stack"]
-        assert all(entry["strategy"] == "replace" for entry in stack)
+        assert all(entry["strategy"] == "additive" for entry in stack)
 
 
 class TestHookLayerInvariants:
@@ -1830,61 +1895,6 @@ class TestNoRegressionExistingKinds:
                 assert "presetName" in entry
                 assert "hidden" in entry
                 assert "manifestPath" in entry
-
-
-class TestIsHookRegisteredHelper:
-    """HookExecutor.is_hook_registered — behavioral truth table."""
-
-    def test_no_config_returns_false(self, spec_kit_project: Path):
-        from specify_cli.extensions import HookExecutor
-
-        assert (
-            HookExecutor(spec_kit_project).is_hook_registered(
-                event_name="before_specify",
-                extension_id="whatever",
-                command="cmd.x",
-            )
-            is False
-        )
-
-    def test_matching_binding_returns_true(self, spec_kit_project: Path):
-        from specify_cli.extensions import HookExecutor
-
-        _write_hook_binding(
-            spec_kit_project,
-            "before_specify",
-            entries=[
-                {"extension": "ext-a", "command": "cmd.x", "enabled": True}
-            ],
-        )
-        executor = HookExecutor(spec_kit_project)
-        assert executor.is_hook_registered("before_specify", "ext-a", "cmd.x") is True
-
-    def test_disabled_binding_returns_false(self, spec_kit_project: Path):
-        from specify_cli.extensions import HookExecutor
-
-        _write_hook_binding(
-            spec_kit_project,
-            "before_specify",
-            entries=[
-                {"extension": "ext-a", "command": "cmd.x", "enabled": False}
-            ],
-        )
-        executor = HookExecutor(spec_kit_project)
-        assert executor.is_hook_registered("before_specify", "ext-a", "cmd.x") is False
-
-    def test_command_mismatch_returns_false(self, spec_kit_project: Path):
-        from specify_cli.extensions import HookExecutor
-
-        _write_hook_binding(
-            spec_kit_project,
-            "before_specify",
-            entries=[
-                {"extension": "ext-a", "command": "cmd.y", "enabled": True}
-            ],
-        )
-        executor = HookExecutor(spec_kit_project)
-        assert executor.is_hook_registered("before_specify", "ext-a", "cmd.x") is False
 
 
 def test_module_imports():

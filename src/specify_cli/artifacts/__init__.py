@@ -108,11 +108,9 @@ class HookArtifact:
     """One row in the flat inventory for a hook contribution.
 
     A hook row is keyed by the ``(eventName, targetCommand)`` pair. The
-    top-level ``optional`` and ``priority`` scalars reflect the contributor
-    marked ``active: true`` on the composition stack — the priority-sorted
-    winner the runtime will actually execute. ``registered`` reflects the
-    project's ``.specify/extensions.yml`` binding state, matching the
-    runtime's own execution decision.
+    stack preserves every contributor in runtime execution order.
+    ``registered`` is true when any contributor has an enabled binding in
+    the project's ``.specify/extensions.yml``.
     """
 
     id: str
@@ -121,8 +119,6 @@ class HookArtifact:
     description: str
     eventName: str
     targetCommand: str
-    optional: bool
-    priority: int
     registered: bool
 
     def to_json_dict(self) -> dict[str, Any]:
@@ -133,8 +129,6 @@ class HookArtifact:
             "description": self.description,
             "eventName": self.eventName,
             "targetCommand": self.targetCommand,
-            "optional": self.optional,
-            "priority": self.priority,
             "registered": self.registered,
         }
 
@@ -147,10 +141,10 @@ class HookStackEntry:
     common to every artifact kind (``id``, ``layer``, ``sourceId``,
     ``strategy``, ``active``, ``lookupId``) and add ``priority`` and
     ``optional`` — the two per-contributor scalars that vary across the stack
-    and drive the runtime's active-winner selection. ``strategy`` is fixed
-    to ``"replace"`` because the runtime does not implement a composable hook
-    strategy vocabulary; the field is present for shape parity with the other
-    kinds. Hooks are always attributed to a manifest-declared contributor
+    and determine the runtime's execution order. ``strategy`` is fixed to
+    ``"additive"`` because enabled hooks from different extensions all run;
+    priority orders them but does not select a winner. Hooks are always
+    attributed to a manifest-declared contributor
     (``preset`` or ``extension``), so ``layer``, ``sourceId``, and ``lookupId``
     are never ``None``.
     """
@@ -158,7 +152,7 @@ class HookStackEntry:
     id: str
     layer: LayerName
     sourceId: str
-    strategy: Literal["replace"]
+    strategy: Literal["additive"]
     active: bool
     lookupId: str
     priority: int
@@ -493,6 +487,7 @@ def _hook_public_id(event_name: str, command: str) -> str:
 
 def _build_hook_stack(
     grouped: list[tuple[int, dict[str, Any]]],
+    enabled_bindings: list[dict[str, Any]],
 ) -> list[HookStackEntry]:
     """Build the composition stack for a single ``(event, command)`` group.
 
@@ -501,8 +496,9 @@ def _build_hook_stack(
     Contributors are re-sorted by ``(priority, insertion_index)`` — Python's
     stable sort combined with the ascending secondary key preserves the same
     "priority ascending, ties break by insertion order" behavior the runtime
-    uses (see ``HookExecutor.get_hooks_for_event``). The first entry after
-    the sort is marked ``active: true``.
+    uses (see ``HookExecutor.get_hooks_for_event``). Each entry's ``active``
+    flag independently reflects whether that contributor's binding is enabled;
+    multiple entries can therefore be active and execute.
     """
     from ..extensions import DEFAULT_HOOK_PRIORITY, normalize_priority
 
@@ -515,24 +511,31 @@ def _build_hook_stack(
 
     ordered = sorted(grouped, key=_sort_key)
     entries: list[HookStackEntry] = []
-    for position, (_idx, contribution) in enumerate(ordered):
+    for _idx, contribution in ordered:
         layer = contribution.get("layer", "extension")
-        source_id = contribution.get("sourceId", "")
+        source_id = str(contribution.get("sourceId", ""))
         lookup_id = contribution.get("id", "")
+        event_name = str(contribution.get("eventName", ""))
+        command = str(contribution.get("command", ""))
         priority = normalize_priority(
             contribution.get("priority"), DEFAULT_HOOK_PRIORITY
         )
         optional = bool(contribution.get("optional", True))
+        active = any(
+            binding.get("extension") == source_id
+            and (
+                not binding.get("command")
+                or binding.get("command") == command
+            )
+            for binding in enabled_bindings
+        )
         entries.append(
             HookStackEntry(
-                id=_hook_public_id(
-                    str(contribution.get("eventName", "")),
-                    str(contribution.get("command", "")),
-                ),
+                id=_hook_public_id(event_name, command),
                 layer=layer,  # type: ignore[arg-type]
-                sourceId=str(source_id),
-                strategy="replace",
-                active=(position == 0),
+                sourceId=source_id,
+                strategy="additive",
+                active=active,
                 lookupId=str(lookup_id),
                 priority=priority,
                 optional=optional,
@@ -814,8 +817,7 @@ class ArtifactCatalog:
         Ordered so all command/template/script rows appear first (sorted by
         the existing ``kind`` order and then by name), followed by hook rows
         sorted primarily by ``eventName`` alphabetical and secondarily by the
-        winner's ``priority`` — matching the runtime's execution order for
-        hooks that share an event (see FR-016).
+        first stack entry's execution priority.
         """
         artifacts, layers_cache = self._collect_inventory()
         rows: list[dict[str, Any]] = []
@@ -1013,8 +1015,8 @@ class ArtifactCatalog:
         """Return the hook inventory plus the per-pair composition stacks.
 
         The list is sorted primarily by ``eventName`` alphabetical and
-        secondarily by the winner's ``priority`` — matching FR-016. Ties
-        between winners at the same event and priority preserve first-yield
+        secondarily by the first hook's execution priority. Ties
+        at the same event and priority preserve first-yield
         insertion order via a stable sort.
 
         The second return value maps each ``(eventName, targetCommand)`` pair
@@ -1043,9 +1045,15 @@ class ArtifactCatalog:
 
         rows: list[HookArtifact] = []
         stack_cache: dict[tuple[str, str], list[HookStackEntry]] = {}
+        enabled_hooks_by_event: dict[str, list[dict[str, Any]]] = {}
 
         for (event_name, command), contributions in grouped.items():
-            stack_entries = _build_hook_stack(contributions)
+            if event_name not in enabled_hooks_by_event:
+                enabled_hooks_by_event[event_name] = hook_executor.get_hooks_for_event(
+                    event_name
+                )
+            enabled_bindings = enabled_hooks_by_event[event_name]
+            stack_entries = _build_hook_stack(contributions, enabled_bindings)
             stack_cache[(event_name, command)] = stack_entries
             if not stack_entries:  # pragma: no cover — invariant
                 continue
@@ -1073,18 +1081,9 @@ class ArtifactCatalog:
                     description = candidate
                     break
 
-            # Top-level ``optional`` / ``priority`` mirror the active winner
-            # (FR-017); ``registered`` is true when ANY contributor in the
-            # stack has a matching, non-disabled binding entry (Q1 answer B).
-            winner = stack_entries[0]
-            registered = any(
-                hook_executor.is_hook_registered(
-                    event_name=event_name,
-                    extension_id=entry.sourceId,
-                    command=command,
-                )
-                for entry in stack_entries
-            )
+            # Hooks execute additively. Registration is therefore the OR of
+            # the independently enabled contributors, not a winner property.
+            registered = any(entry.active for entry in stack_entries)
 
             rows.append(
                 HookArtifact(
@@ -1094,13 +1093,16 @@ class ArtifactCatalog:
                     description=description,
                     eventName=event_name,
                     targetCommand=command,
-                    optional=winner.optional,
-                    priority=winner.priority,
                     registered=registered,
                 )
             )
 
-        rows.sort(key=lambda row: (row.eventName, row.priority))
+        rows.sort(
+            key=lambda row: (
+                row.eventName,
+                stack_cache[(row.eventName, row.targetCommand)][0].priority,
+            )
+        )
         return rows, stack_cache
 
     def _iter_candidate_artifacts(
