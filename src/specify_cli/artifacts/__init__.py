@@ -108,9 +108,11 @@ class HookArtifact:
     """One row in the flat inventory for a hook contribution.
 
     A hook row is keyed by the ``(eventName, targetCommand)`` pair. The
-    stack preserves every contributor in runtime execution order.
+    stack preserves every contributor in declared priority order.
     ``registered`` is true when any contributor has an enabled binding in
-    the project's ``.specify/extensions.yml``.
+    the project's ``.specify/extensions.yml``. This follows Spec Kit's
+    existing split: manifests describe hook contributions, while
+    ``HookExecutor.get_hooks_for_event`` supplies current activation state.
     """
 
     id: str
@@ -493,13 +495,14 @@ def _build_hook_stack(
 
     ``grouped`` is the subset of ``_iter_hook_contributions`` output that
     shares one ``(eventName, command)`` pair, in original insertion order.
-    Contributors are re-sorted by ``(priority, insertion_index)`` — Python's
-    stable sort combined with the ascending secondary key preserves the same
-    "priority ascending, ties break by insertion order" behavior the runtime
-    uses (see ``HookExecutor.get_hooks_for_event``). Each entry is ``active``
-    exactly when its declaration matches an enabled runtime registration
-    returned by that method. Multiple entries can therefore be active and
-    execute. Event-time condition evaluation does not affect this flag.
+    Contributors are sorted by their manifest-declared
+    ``(priority, insertion_index)``. Registration normally copies those
+    values into ``.specify/extensions.yml``, so this matches Spec Kit's
+    standard hook ordering unless project runtime configuration has later
+    diverged from the declaration. Each entry is ``active`` exactly when its
+    declaration matches an enabled runtime registration returned by
+    ``HookExecutor.get_hooks_for_event``. Multiple entries can therefore be
+    active. Event-time condition evaluation does not affect this flag.
     """
     from ..extensions import DEFAULT_HOOK_PRIORITY, normalize_priority
 
@@ -818,7 +821,7 @@ class ArtifactCatalog:
         Ordered so all command/template/script rows appear first (sorted by
         the existing ``kind`` order and then by name), followed by hook rows
         sorted primarily by ``eventName`` alphabetical and secondarily by the
-        first stack entry's execution priority.
+        first stack entry's manifest-declared priority.
         """
         artifacts, layers_cache = self._collect_inventory()
         rows: list[dict[str, Any]] = []
@@ -1016,7 +1019,7 @@ class ArtifactCatalog:
         """Return the hook inventory plus the per-pair composition stacks.
 
         The list is sorted primarily by ``eventName`` alphabetical and
-        secondarily by the first hook's execution priority. Ties
+        secondarily by the first hook's manifest-declared priority. Ties
         at the same event and priority preserve first-yield
         insertion order via a stable sort.
 

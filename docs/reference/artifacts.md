@@ -192,11 +192,11 @@ Hook rows extend the shape above with a few fields that only apply to hooks. A h
 | `targetCommand` | The command the hook proposes to run when the event fires                                        |
 | `registered`    | `true` when at least one matching `.specify/extensions.yml` binding is enabled                   |
 
-There are no row-level `optional` or `priority` fields because hooks do not have a single winner. Those values remain on each stack entry, where they describe that contributor's runtime binding.
+There are no row-level `optional` or `priority` fields because hooks do not have a single winner. Those values remain on each stack entry, where they describe that contributor's manifest declaration.
 
 ### Hook stack entries
 
-Hook stack entries drop `presetId`, `presetName`, `hidden`, and `manifestPath` (all of which are meaningless for hooks) and add per-contributor `priority` and `optional`. Hooks execute additively across extensions: priority determines execution order, but it does not suppress a lower-priority declaration. The stack mirrors that behavior by retaining every contributor in runtime order.
+Hook stack entries drop `presetId`, `presetName`, `hidden`, and `manifestPath` (all of which are meaningless for hooks) and add per-contributor `priority` and `optional`. Hooks execute additively across extensions, so priority never suppresses another declaration. The stack retains every contributor in manifest-declared priority order.
 
 | Field       | Description                                                                                 |
 | ----------- | -------------------------------------------------------------------------------------------- |
@@ -206,14 +206,16 @@ Hook stack entries drop `presetId`, `presetName`, `hidden`, and `manifestPath` (
 | `strategy`  | Always `"additive"` because enabled contributors all execute                                |
 | `active`    | `true` exactly when this declaration matches an enabled runtime registration returned by `HookExecutor.get_hooks_for_event()`; multiple entries may be `true` |
 | `lookupId`  | The manifest identifier: `{layer}:{sourceId}:hook:{eventName}:{targetCommand}`               |
-| `priority`  | Per-contributor priority (ascending = earlier execution; falls back to the runtime default)  |
-| `optional`  | Per-contributor optional flag                                                                |
+| `priority`  | Priority declared by the contributing manifest (ascending values are registered to run earlier by default) |
+| `optional`  | Optional flag declared by the contributing manifest                                          |
 
 ### `registered` semantics
 
 `registered` reflects the project's runtime binding state under `.specify/extensions.yml` and MUST match the runtime's own execution decision. Each stack entry is independently `active` when an entry in the event's binding array (a) names that contributor via `extension`, (b) matches the command or omits it, and (c) is not explicitly `enabled: false`. Top-level `registered` is `true` when any stack entry is active. This mirrors the runtime: `HookExecutor.get_hooks_for_event` returns every enabled entry, sorted by priority.
 
 `active` describes registration state only. It does not identify a priority winner or evaluate the hook's optional event-time `condition`; condition filtering happens later in `HookExecutor.check_hooks_for_event()`.
+
+This division is consistent with Spec Kit's existing hook model: the installed extension manifest declares the hook and its defaults, while `.specify/extensions.yml` records the project's registered and enabled runtime state. Registration normally copies `priority` and `optional` from the manifest, but this artifact view does not attempt to reconcile later manual drift between those files; that broader registration concern is outside this command.
 
 A declared hook whose contributors have **no** matching binding entry still appears in the inventory with `registered: false`. This is intentional: `artifact list --json` describes what an extension declares, and `registered` tells you whether the runtime will actually invoke it. A structurally invalid `.specify/extensions.yml` (parse error, wrong top-level type, missing `hooks:` key) is silently normalized to an empty bindings map — every declared hook then reports `registered: false` and no error is raised to callers.
 
@@ -225,7 +227,7 @@ Runtime bindings under `.specify/extensions.yml` that name an extension or comma
 
 ### Sort order
 
-Hooks appear after all `command` / `template` / `script` rows in `artifact list --json`. Within the hook block, rows are sorted primarily by `eventName` (alphabetical) and secondarily by the first stack entry's execution priority (ascending). Stack entries themselves use the runtime order: priority ascending, with original insertion order preserved for ties.
+Hooks appear after all `command` / `template` / `script` rows in `artifact list --json`. Within the hook block, rows are sorted primarily by `eventName` (alphabetical) and secondarily by the first stack entry's manifest-declared priority (ascending). Stack entries use declared priority ascending, with original insertion order preserved for ties.
 
 ## JSON Errors
 
