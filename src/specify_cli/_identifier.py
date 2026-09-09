@@ -43,10 +43,12 @@ PROJECT_OVERRIDE_LAYER = "project"
 
 Project overrides are a resolver feature — they are not backed by any manifest
 contribution. When a resolved artifact stack contains a project-override layer,
-its ``lookupId`` uses this label so the round-trip invariant (every layer
-carries a ``lookupId``) still holds. No manifest ``iter_contributions()`` will
-ever emit a matching ``id``, so consumers see "not found" for the lookup, which
-is the correct outcome for a layer with no originating manifest entry.
+its ``lookupId`` uses this label so provenance-backed non-built-in layers have
+a stable stack identity. No manifest ``iter_contributions()`` will ever emit a
+matching ``id``, so consumers see "not found" for the lookup, which is the
+correct outcome for a layer with no originating manifest entry. Built-in layers
+carry no ``lookupId`` and round-trip through their source-agnostic public
+``kind:name`` artifact ID instead.
 """
 
 _LAYER_KINDS = frozenset({PROJECT_OVERRIDE_LAYER, "preset", "extension"})
@@ -57,6 +59,13 @@ _HOOK_LAYERS = frozenset({"preset", "extension"})
 
 class IdentifierComponentError(ValueError):
     """Raised when a manifest component would break identifier grammar."""
+
+
+def _source_id_matches_layer(layer: str, source_id: str) -> bool:
+    """Return whether ``source_id`` satisfies the layer sentinel contract."""
+    if layer == PROJECT_OVERRIDE_LAYER:
+        return source_id == "_"
+    return layer in {"preset", "extension"} and source_id != "_"
 
 
 def validate_component(value: Any, field_label: str) -> str:
@@ -95,6 +104,15 @@ def derive_named_id(layer: str, source_id: str, kind: str, name: str) -> str:
     derivation boundary that must enforce the grammar. Callers passing raw
     strings should either pre-validate or handle
     :class:`IdentifierComponentError`.
+
+    The project-layer sentinel is also enforced here: the project layer uses
+    ``sourceId == "_"`` (see :data:`PROJECT_OVERRIDE_LAYER`) and no other
+    value; the preset and extension layers never use ``"_"``, which is
+    reserved for the project layer. Callers that mix these up would produce a
+    lookupId :func:`layer_kind_from_lookup_id` still parses but that no
+    manifest ever emits — a silent join-key mismatch. Rejecting the mix here
+    keeps the grammar's sentinel contract enforced at the single derivation
+    boundary rather than in each caller.
     """
     validate_component(layer, "layer")
     validate_component(source_id, "sourceId")
@@ -104,6 +122,18 @@ def derive_named_id(layer: str, source_id: str, kind: str, name: str) -> str:
     if kind not in _NAMED_CONTRIBUTION_KINDS:
         raise IdentifierComponentError(f"Invalid named contribution kind '{kind}'")
     validate_component(name, "name")
+    if layer == PROJECT_OVERRIDE_LAYER and not _source_id_matches_layer(
+        layer, source_id
+    ):
+        raise IdentifierComponentError(
+            f"Invalid sourceId '{source_id}': project layer requires '_'"
+        )
+    if layer in {"preset", "extension"} and not _source_id_matches_layer(
+        layer, source_id
+    ):
+        raise IdentifierComponentError(
+            "Invalid sourceId '_': reserved for project layer"
+        )
     return f"{layer}:{source_id}:{kind}:{name}"
 
 
@@ -145,6 +175,8 @@ def layer_kind_from_lookup_id(lookup_id: str) -> str | None:
     layer = parts[0]
     if layer not in _LAYER_KINDS:
         return None
+    if not _source_id_matches_layer(layer, parts[1]):
+        return None
     if parts[2] not in _CONTRIBUTION_KINDS:
         return None
     expected_len = 5 if parts[2] == "hook" else 4
@@ -171,6 +203,20 @@ def is_dotted_command_name(value: str) -> bool:
     )
 
 
+def source_id_from_lookup_id(lookup_id: str) -> str | None:
+    """Return the sourceId segment of a resolved-stack ``lookupId``, or ``None``.
+
+    Returns ``None`` for any value that :func:`layer_kind_from_lookup_id`
+    would reject — same validation, same grammar, single source of truth.
+    Consumers must not ``.split(":")`` a ``lookupId`` themselves: the
+    grammar's segmentation lives in this module, and any caller doing its
+    own split leaks the layout across the codebase.
+    """
+    if layer_kind_from_lookup_id(lookup_id) is None:
+        return None
+    return lookup_id.split(":", 2)[1]
+
+
 def derive_hook_id(
     layer: str,
     source_id: str,
@@ -186,6 +232,10 @@ def derive_hook_id(
     validate_component(source_id, "sourceId")
     if layer not in _HOOK_LAYERS:
         raise IdentifierComponentError(f"Invalid layer '{layer}'")
+    if not _source_id_matches_layer(layer, source_id):
+        raise IdentifierComponentError(
+            "Invalid sourceId '_': reserved for project layer"
+        )
     validate_component(event_name, "eventName")
     validate_component(command, "command")
     return f"{layer}:{source_id}:hook:{event_name}:{command}"

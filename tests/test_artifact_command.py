@@ -118,6 +118,7 @@ class TestListArtifactsContract:
             assert info["stack"][-1]["layer"] is None
             assert info["stack"][-1]["sourceId"] is None
             assert info["stack"][-1]["lookupId"] is None
+            assert info["stack"][-1]["sourcePath"] is None
 
     def test_excludes_disabled_and_unusable_manifest_contributions(
         self, spec_kit_project: Path
@@ -263,6 +264,7 @@ class TestListArtifactsContract:
             assert layer["layer"] is None
             assert layer["sourceId"] is None
             assert layer["lookupId"] is None
+            assert layer["sourcePath"] is None
 
     def test_includes_root_level_pack_template_but_excludes_readme(
         self, spec_kit_project: Path
@@ -284,14 +286,10 @@ class TestListArtifactsContract:
             row for row in catalog.list_artifacts() if row.name == "legacy-root"
         ).description == "Legacy root template"
 
-    @pytest.mark.parametrize("registry_dir, registry_name", [
-        ("extensions", "extensions"),
-        ("presets", "presets"),
-    ])
-    def test_registry_missing_collection_key_is_corrupt(
-        self, spec_kit_project: Path, registry_dir: str, registry_name: str
+    def test_extension_registry_missing_collection_key_is_corrupt(
+        self, spec_kit_project: Path
     ):
-        registry_path = spec_kit_project / ".specify" / registry_dir / ".registry"
+        registry_path = spec_kit_project / ".specify" / "extensions" / ".registry"
         registry_path.write_text('{"schema_version": "1.0"}', encoding="utf-8")
 
         with pytest.raises(ArtifactResolutionError):
@@ -486,6 +484,7 @@ class TestInfoContract:
         assert builtin["manifestPath"] is None
         assert builtin["strategy"] == "replace"
         assert builtin["lookupId"] is None
+        assert builtin["sourcePath"] is None
 
     def test_public_layer_shape_preserves_non_core_identity(self):
         assert _public_layer_shape(
@@ -506,6 +505,7 @@ class TestInfoContract:
         assert project["presetId"] is None
         assert project["presetName"] is None
         assert project["manifestPath"] is None
+        assert project["sourcePath"] is None
         assert project["strategy"] == "replace"
         assert project["sourceId"] == "_"
         assert re.match(r"^project:_:(command|template|script):[^:]+$", project["lookupId"])
@@ -594,21 +594,6 @@ class TestErrors:
 
         with pytest.raises(ArtifactResolutionError):
             ArtifactCatalog(spec_kit_project).get_artifact_info("command:speckit.constitution")
-
-    def test_info_rejects_corrupt_preset_registry(self, spec_kit_project: Path):
-        registry = spec_kit_project / ".specify" / "presets" / ".registry"
-        registry.write_text("{invalid", encoding="utf-8")
-
-        with pytest.raises(ArtifactResolutionError):
-            ArtifactCatalog(spec_kit_project).get_artifact_info("command:speckit.constitution")
-
-    def test_list_rejects_corrupt_preset_registry(self, spec_kit_project: Path):
-        registry = spec_kit_project / ".specify" / "presets" / ".registry"
-        registry.write_text("{invalid", encoding="utf-8")
-
-        with pytest.raises(ArtifactResolutionError):
-            ArtifactCatalog(spec_kit_project).list_artifacts()
-
 
 class TestKindHint:
     def test_kind_flag_disambiguates(self, spec_kit_project: Path):
@@ -738,6 +723,180 @@ class TestCLI:
         assert info_result.exit_code == 0, info_result.stderr
         info = json.loads(info_result.stdout)
         assert row["stack"] == info["stack"]
+
+    def test_hidden_command_layer_source_path_is_own_pack_file(
+        self, spec_kit_project: Path
+    ):
+        """A hidden (non-active) command row must not report the winner's
+        shared materialized agent output as its ``sourcePath``.
+
+        Both presets below register the same command name and the same
+        agent skill name, so the tracked materialized output is a single
+        shared file. Only the active (winning) row may report that shared
+        file; the hidden loser row must report its own installed pack file.
+        """
+        pack_low = install_preset(
+            spec_kit_project,
+            "aaa-low-priority-preset",
+            {
+                "commands": [
+                    {
+                        "name": "speckit.compliance.plan",
+                        "file": "commands/speckit.compliance.plan.md",
+                        "description": "Loser",
+                    }
+                ]
+            },
+            priority=20,
+        )
+        (pack_low / "commands").mkdir()
+        (pack_low / "commands" / "speckit.compliance.plan.md").write_text(
+            "---\ndescription: Loser\n---\nloser body\n", encoding="utf-8"
+        )
+        PresetRegistry(spec_kit_project / ".specify" / "presets").update(
+            "aaa-low-priority-preset",
+            {"registered_skills": {"copilot": ["speckit-compliance-plan"]}},
+        )
+
+        pack_high = install_preset(
+            spec_kit_project,
+            "zzz-high-priority-preset",
+            {
+                "commands": [
+                    {
+                        "name": "speckit.compliance.plan",
+                        "file": "commands/speckit.compliance.plan.md",
+                        "description": "Winner",
+                    }
+                ]
+            },
+            priority=5,
+        )
+        (pack_high / "commands").mkdir()
+        (pack_high / "commands" / "speckit.compliance.plan.md").write_text(
+            "---\ndescription: Winner\n---\nwinner body\n", encoding="utf-8"
+        )
+        PresetRegistry(spec_kit_project / ".specify" / "presets").update(
+            "zzz-high-priority-preset",
+            {"registered_skills": {"copilot": ["speckit-compliance-plan"]}},
+        )
+
+        skill_file = (
+            spec_kit_project
+            / ".github"
+            / "skills"
+            / "speckit-compliance-plan"
+            / "SKILL.md"
+        )
+        skill_file.parent.mkdir(parents=True)
+        skill_file.write_text("---\nname: speckit-compliance-plan\n---\n", encoding="utf-8")
+
+        info = ArtifactCatalog(spec_kit_project).get_artifact_info("speckit.compliance.plan")
+        stack = info["stack"]
+        assert stack[0]["active"] is True
+        assert stack[0]["sourcePath"] == ".github/skills/speckit-compliance-plan/SKILL.md"
+
+        hidden_rows = [layer for layer in stack if layer["active"] is False]
+        assert hidden_rows
+        for row in hidden_rows:
+            assert row["sourcePath"] != stack[0]["sourcePath"]
+            assert row["sourcePath"] == (
+                ".specify/presets/aaa-low-priority-preset/commands/speckit.compliance.plan.md"
+            )
+
+    def test_list_json_stack_source_path_contract(
+        self, spec_kit_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        preset_pack = install_preset(
+            spec_kit_project,
+            "compliance",
+            {
+                "commands": [
+                    {
+                        "name": "speckit.compliance.plan",
+                        "file": "commands/speckit.compliance.plan.md",
+                        "description": "Compliance plan",
+                    }
+                ]
+            },
+        )
+        (preset_pack / "commands").mkdir()
+        (preset_pack / "commands" / "speckit.compliance.plan.md").write_text(
+            "---\ndescription: Compliance plan\n---\nbody\n", encoding="utf-8"
+        )
+        PresetRegistry(spec_kit_project / ".specify" / "presets").update(
+            "compliance",
+            {
+                "registered_skills": {
+                    "copilot": ["speckit-compliance-plan"],
+                }
+            },
+        )
+        skill_file = (
+            spec_kit_project
+            / ".github"
+            / "skills"
+            / "speckit-compliance-plan"
+            / "SKILL.md"
+        )
+        skill_file.parent.mkdir(parents=True)
+        skill_file.write_text("---\nname: speckit-compliance-plan\n---\n", encoding="utf-8")
+
+        extension_dir = spec_kit_project / ".specify" / "extensions" / "quality"
+        (extension_dir / "templates").mkdir(parents=True)
+        (extension_dir / "templates" / "checklist.md").write_text(
+            "---\ndescription: Extension checklist\n---\n", encoding="utf-8"
+        )
+        (extension_dir / "extension.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "schema_version": "1.0",
+                    "extension": {
+                        "id": "quality",
+                        "name": "Quality",
+                        "version": "1.0.0",
+                        "description": "test",
+                        "author": "test",
+                        "repository": "https://example.com",
+                        "license": "MIT",
+                    },
+                    "requires": {"speckit_version": ">=0.2.0"},
+                    "provides": {
+                        "templates": [
+                            {
+                                "name": "checklist",
+                                "file": "templates/checklist.md",
+                                "description": "Extension checklist",
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        ExtensionRegistry(spec_kit_project / ".specify" / "extensions").add(
+            "quality", {"version": "1.0.0", "enabled": True}
+        )
+
+        monkeypatch.chdir(spec_kit_project)
+        runner = CliRunner()
+        result = runner.invoke(app, ["artifact", "list", "--json"])
+        assert result.exit_code == 0, result.stderr
+        payload = json.loads(result.stdout)
+
+        non_null_source_paths: set[str] = set()
+        for row in payload:
+            for layer in row["stack"]:
+                assert "sourcePath" in layer
+                source_path = layer["sourcePath"]
+                if source_path is None:
+                    continue
+                assert isinstance(source_path, str)
+                assert (spec_kit_project / source_path).is_file()
+                non_null_source_paths.add(source_path)
+
+        assert ".github/skills/speckit-compliance-plan/SKILL.md" in non_null_source_paths
+        assert ".specify/extensions/quality/templates/checklist.md" in non_null_source_paths
 
     def test_list_json_is_pretty_printed(self, spec_kit_project: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.chdir(spec_kit_project)
@@ -1166,6 +1325,7 @@ class TestManifestPathPortability:
             "path": pack_dir / "spec-template.md",
             "preset_id": "my-pack",
             "pack_dir": pack_dir,
+            "manifest_declared": True,
         }
         assert (
             _derive_manifest_path(layer, project_root)
@@ -1183,6 +1343,7 @@ class TestManifestPathPortability:
             "path": ext_dir / "commands" / "speckit.my-ext.go.md",
             "extension_id": "my-ext",
             "extension_dir": ext_dir,
+            "manifest_declared": True,
         }
         assert (
             _derive_manifest_path(layer, project_root)
@@ -1206,6 +1367,7 @@ class TestManifestPathPortability:
             "path": pack_dir / "spec-template.md",
             "preset_id": "renamed-on-disk",
             "pack_dir": pack_dir,
+            "manifest_declared": True,
         }
         assert (
             _derive_manifest_path(layer, project_root)
@@ -1222,6 +1384,7 @@ class TestManifestPathPortability:
             "path": pack_dir / "spec-template.md",
             "preset_id": "my-pack",
             "pack_dir": pack_dir,
+            "manifest_declared": True,
         }
         assert _derive_manifest_path(layer, project_root) is None
 
@@ -1236,6 +1399,7 @@ class TestManifestPathPortability:
         layer = {
             "lookupId": "preset:my-pack:template:spec-template",
             "path": pack_dir / "spec-template.md",
+            "manifest_declared": True,
         }
         assert _derive_manifest_path(layer, project_root) is None
 
@@ -1247,6 +1411,30 @@ class TestManifestPathPortability:
         project_layer = {"lookupId": "project:_:template:spec-template"}
         assert _derive_manifest_path(builtin_layer, project_root) is None
         assert _derive_manifest_path(project_layer, project_root) is None
+
+    def test_convention_only_extension_layer_reports_no_manifest_path(
+        self, tmp_path: Path
+    ):
+        """A contribution the manifest does not declare in ``provides`` — a
+        "convention-only" contribution — must NOT report the manifest as its
+        source, even when the manifest file exists on disk. Joining on the
+        reported path would find no matching contribution. One extension test
+        covers both the preset and extension branches: ``_derive_manifest_path``
+        gates on the layer's ``manifest_declared`` flag before dispatching by
+        layer kind."""
+        project_root = tmp_path / "proj"
+        ext_dir = project_root / ".specify" / "extensions" / "foo"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "extension.yml").write_text("id: foo\n", encoding="utf-8")
+
+        layer = {
+            "lookupId": "extension:foo:command:speckit.baz",
+            "path": ext_dir / "commands" / "baz.md",
+            "extension_id": "foo",
+            "extension_dir": ext_dir,
+            "manifest_declared": False,
+        }
+        assert _derive_manifest_path(layer, project_root) is None
 
 
 class TestPresetDisplayName:

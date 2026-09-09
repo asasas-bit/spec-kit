@@ -25,6 +25,7 @@ from .._identifier import (
     derive_public_id,
     is_dotted_command_name,
     layer_kind_from_lookup_id,
+    source_id_from_lookup_id,
     validate_component,
 )
 from .._script_variants import canonical_script_name
@@ -87,6 +88,7 @@ class StackLayer:
     hidden: bool
     manifestPath: str | None
     lookupId: str | None
+    sourcePath: str | None
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -100,6 +102,7 @@ class StackLayer:
             "hidden": self.hidden,
             "manifestPath": self.manifestPath,
             "lookupId": self.lookupId,
+            "sourcePath": self.sourcePath,
         }
 
 
@@ -342,7 +345,10 @@ def _public_layer_shape(
     layer_kind = layer_kind_from_lookup_id(lookup_id)
     if layer_kind not in ("project", "preset", "extension"):
         raise ArtifactResolutionError()
-    return layer_kind, lookup_id.split(":", 2)[1], lookup_id
+    source_id = source_id_from_lookup_id(lookup_id)
+    if source_id is None:
+        raise ArtifactResolutionError()
+    return layer_kind, source_id, lookup_id
 
 
 def _derive_manifest_path(layer: dict[str, Any], project_root: Path) -> str | None:
@@ -361,10 +367,22 @@ def _derive_manifest_path(layer: dict[str, Any], project_root: Path) -> str | No
     layers — which ``collect_all_layers()`` always sets alongside
     ``lookupId``. Missing provenance keys mean no manifest path is available.
 
+    Convention-only contributions are surfaced by the resolver even when the
+    pack's manifest does not declare them — the manifest file exists on disk
+    but does not list the artifact in ``provides``. Reporting the manifest
+    path in that case would be a false positive: consumers joining on the
+    reported path would find no matching contribution. ``collect_all_layers``
+    sets ``manifest_declared=True`` on layers that came from a manifest
+    ``provides`` entry, so those layers alone report a manifest path; a layer
+    without that flag falls through to ``None`` even when the manifest file
+    exists on disk.
+
     Uses ``as_posix()`` so the string is stable across Windows and POSIX — a
     caller comparing snapshots between operating systems gets the same value
     on both.
     """
+    if not layer.get("manifest_declared"):
+        return None
     lookup_id = layer.get("lookupId", "")
     layer_kind = layer_kind_from_lookup_id(lookup_id)
     if layer_kind == "preset":
@@ -389,6 +407,184 @@ def _derive_manifest_path(layer: dict[str, Any], project_root: Path) -> str | No
         return manifest_path.relative_to(project_root).as_posix()
     except ValueError:
         return None
+
+
+def _repo_relative_existing_file(project_root: Path, path: Path) -> str | None:
+    """Return *path* relative to the project root when it is an existing file."""
+    if not path.is_file():
+        return None
+    try:
+        return path.relative_to(project_root).as_posix()
+    except ValueError:
+        return None
+
+
+def _is_safe_path_component(value: str) -> bool:
+    """Return true when *value* is a single non-traversing path component."""
+    if not value or value in (".", ".."):
+        return False
+    path = Path(value)
+    return not path.is_absolute() and len(path.parts) == 1 and path.name == value
+
+
+def _materialized_command_source_path(
+    project_root: Path,
+    metadata: dict[str, Any] | None,
+    name: str,
+    *,
+    source: Literal["preset", "extension"],
+) -> str | None:
+    """Return the tracked agent output path for an installed command layer."""
+    if not isinstance(metadata, dict):
+        return None
+
+    try:
+        from ..agents import CommandRegistrar
+    except ImportError:
+        return None
+
+    registrar = CommandRegistrar()
+
+    registered_commands = metadata.get("registered_commands")
+    if isinstance(registered_commands, dict):
+        for agent_name in sorted(registered_commands):
+            cmd_names = registered_commands.get(agent_name)
+            if not isinstance(cmd_names, list):
+                continue
+            if name not in cmd_names:
+                continue
+            agent_config = registrar.AGENT_CONFIGS.get(agent_name)
+            if agent_config is None:
+                continue
+            command_path = registrar.resolve_command_output_path(
+                agent_name, name, project_root
+            )
+            if command_path is None:
+                continue
+            rel = _repo_relative_existing_file(project_root, command_path)
+            if rel is not None:
+                return rel
+
+    registered_skills = metadata.get("registered_skills")
+    if source == "preset":
+        skill_names_by_agent = registered_skills if isinstance(registered_skills, dict) else {}
+    elif isinstance(registered_skills, list):
+        # Extension registries store skills as a flat list, unlike presets'
+        # per-agent map. Probe every known agent's project-local skills
+        # directory and return the first extant tracked file.
+        skill_names_by_agent = {
+            agent_name: registered_skills for agent_name in sorted(registrar.AGENT_CONFIGS)
+        }
+    else:
+        skill_names_by_agent = {}
+
+    expected_skill_names: set[str] | None = None
+    if source == "extension":
+        try:
+            from ..extensions import ExtensionManager
+
+            expected_skill_names = {ExtensionManager._skill_name_for_command(name)}
+        except ImportError:
+            expected_skill_names = None
+    else:
+        try:
+            from ..presets import PresetManager
+
+            expected_skill_names = set(PresetManager._skill_names_for_command(name))
+        except ImportError:
+            expected_skill_names = None
+
+    if isinstance(skill_names_by_agent, dict):
+        from .. import _get_skills_dir as _project_skills_dir
+
+        for agent_name in sorted(skill_names_by_agent):
+            skill_names = skill_names_by_agent.get(agent_name)
+            if not isinstance(agent_name, str) or not isinstance(skill_names, list):
+                continue
+            agent_config = registrar.AGENT_CONFIGS.get(agent_name)
+            if agent_config is None:
+                continue
+            if registrar.uses_skill_output(agent_name):
+                skills_dir = registrar.resolve_agent_dir(agent_name, project_root)
+            else:
+                skills_dir = _project_skills_dir(project_root, agent_name)
+            if skills_dir is None:
+                continue
+            for skill_name in sorted(
+                n for n in skill_names if isinstance(n, str) and _is_safe_path_component(n)
+            ):
+                if expected_skill_names is not None and skill_name not in expected_skill_names:
+                    continue
+                skill_path = skills_dir / skill_name / "SKILL.md"
+                rel = _repo_relative_existing_file(project_root, skill_path)
+                if rel is not None:
+                    return rel
+
+    return None
+
+
+def _derive_source_path(
+    layer: dict[str, Any],
+    project_root: Path,
+    kind: ArtifactKind,
+    name: str,
+    *,
+    active: bool,
+) -> str | None:
+    """Return the repo-relative concrete file backing a preset/extension layer.
+
+    ``layer`` is one raw ``PresetResolver.collect_all_layers()`` row. Preset
+    and extension rows carry explicit on-disk provenance keys
+    (``preset_id``/``pack_dir`` or ``extension_id``/``extension_dir``)
+    alongside ``lookupId``; core and project rows intentionally do not produce
+    a source path here.
+
+    The tracked materialized agent output is shared by every stack row that
+    contributed the same command name, so it only reflects the winning
+    (``active``) row's content. Lower ``replace``/``merge`` rows must report
+    their own installed pack file instead of that shared output.
+    """
+    lookup_id = layer.get("lookupId", "")
+    layer_kind = layer_kind_from_lookup_id(lookup_id)
+    if layer_kind == "preset":
+        pack_id = layer.get("preset_id")
+        if not isinstance(pack_id, str) or not pack_id:
+            return None
+        from ..presets import PresetRegistry
+
+        metadata = PresetRegistry(project_root / ".specify" / "presets").get(pack_id)
+        if kind == "command" and active:
+            materialized = _materialized_command_source_path(
+                project_root, metadata, name, source="preset"
+            )
+            if materialized is not None:
+                return materialized
+    elif layer_kind == "extension":
+        extension_id = layer.get("extension_id")
+        if not isinstance(extension_id, str) or not extension_id:
+            return None
+        from ..extensions import ExtensionRegistry
+
+        metadata = ExtensionRegistry(project_root / ".specify" / "extensions").get(extension_id)
+        if kind == "command" and active:
+            materialized = _materialized_command_source_path(
+                project_root, metadata, name, source="extension"
+            )
+            if materialized is not None:
+                return materialized
+    else:
+        # Core and project-override rows are built-in/synthetic from the public
+        # artifact contract's perspective, so their sourcePath stays null.
+        return None
+
+    # Non-active command layers, non-command preset/extension layers, and
+    # active command layers without a tracked materialized agent output all
+    # report the installed pack file from the raw
+    # PresetResolver.collect_all_layers() row's concrete ``path`` key.
+    path = layer.get("path")
+    if isinstance(path, Path):
+        return _repo_relative_existing_file(project_root, path)
+    return None
 
 
 def _preset_display_name(pack_dir: Path, pack_id: str) -> str:
@@ -456,6 +652,7 @@ def _iter_hook_contributions(
             counter += 1
             contribution_with_provenance = dict(contribution)
             contribution_with_provenance["lookupId"] = contribution.get("id")
+            contribution_with_provenance["manifest_declared"] = True
             contribution_with_provenance["preset_id"] = pack_id
             contribution_with_provenance["pack_dir"] = (
                 resolver.presets_dir / pack_id
@@ -485,6 +682,7 @@ def _iter_hook_contributions(
             counter += 1
             contribution_with_provenance = dict(contribution)
             contribution_with_provenance["lookupId"] = contribution.get("id")
+            contribution_with_provenance["manifest_declared"] = True
             contribution_with_provenance["extension_id"] = ext_id
             contribution_with_provenance["extension_dir"] = ext_dir
             yield counter, contribution_with_provenance
@@ -624,6 +822,7 @@ def _build_stack(
             hidden = idx > first_replace_idx
 
         layer_kind, source_id, lookup_id = _public_layer_shape(layer)
+        source_path = _derive_source_path(layer, project_root, kind, name, active=active)
 
         if layer_kind == PROJECT_OVERRIDE_LAYER:
             rows.append(
@@ -638,6 +837,7 @@ def _build_stack(
                     hidden=hidden,
                     manifestPath=None,
                     lookupId=lookup_id,
+                    sourcePath=source_path,
                 )
             )
             continue
@@ -656,6 +856,7 @@ def _build_stack(
                     hidden=hidden,
                     manifestPath=manifest_path,
                     lookupId=lookup_id,
+                    sourcePath=source_path,
                 )
             )
             continue
@@ -673,6 +874,7 @@ def _build_stack(
                     hidden=hidden,
                     manifestPath=None,
                     lookupId=None,
+                    sourcePath=source_path,
                 )
             )
             continue
@@ -703,6 +905,7 @@ def _build_stack(
                 hidden=hidden,
                 manifestPath=manifest_path,
                 lookupId=lookup_id,
+                sourcePath=source_path,
             )
         )
     return rows
@@ -734,26 +937,6 @@ def _validate_extension_registry(project_root: Path) -> None:
     from ..extensions import ExtensionRegistry
 
     if ExtensionRegistry(extensions_dir).is_corrupt():
-        raise ArtifactResolutionError()
-
-
-def _validate_preset_registry(project_root: Path) -> None:
-    """Fail closed when the preset registry is present but unreadable.
-
-    ``PresetRegistry._load`` normalizes malformed JSON to an empty mapping so
-    install/enable/disable flows keep working, but that same recovery would
-    silently drop every installed preset from the artifact inventory. Callers
-    that treat the inventory as authoritative must therefore refuse to run
-    against a corrupt registry — same fail-closed contract as
-    :func:`_validate_extension_registry`.
-    """
-    presets_dir = project_root / ".specify" / "presets"
-    if not presets_dir.exists():
-        return
-
-    from ..presets import PresetRegistry
-
-    if PresetRegistry(presets_dir).is_corrupt():
         raise ArtifactResolutionError()
 
 
@@ -984,7 +1167,6 @@ class ArtifactCatalog:
     ]:
         _validate_project(self.project_root)
         _validate_extension_registry(self.project_root)
-        _validate_preset_registry(self.project_root)
 
         from ..presets import PresetError, PresetResolver  # lazy: avoids circular import
 
@@ -1009,6 +1191,9 @@ class ArtifactCatalog:
                 key = (kind, name)
                 if not _is_valid_artifact_name_component(name, kind):
                     continue
+                # Resolve each candidate through Spec Kit's existing single-artifact
+                # path for behavioral parity; optimize shared manifest reads only if
+                # typical small extension sets show a measurable inventory cost.
                 layers = _layers_for(kind, name)
                 if layers and _has_any_replace_layer(layers):
                     names.add(key)
@@ -1064,7 +1249,6 @@ class ArtifactCatalog:
         """
         _validate_project(self.project_root)
         _validate_extension_registry(self.project_root)
-        _validate_preset_registry(self.project_root)
 
         from ..extensions import DEFAULT_HOOK_PRIORITY, HookExecutor, normalize_priority
         from ..presets import PresetError

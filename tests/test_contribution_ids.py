@@ -31,6 +31,7 @@ from specify_cli._identifier import (
     derive_named_id,
     derive_public_id,
     layer_kind_from_lookup_id,
+    source_id_from_lookup_id,
     validate_component,
 )
 from specify_cli.extensions import ExtensionManifest, ValidationError
@@ -377,6 +378,42 @@ class TestLookupIdRoundTrip:
             PROJECT_OVERRIDE_LAYER, "_", "template", "spec-template"
         )
 
+    @pytest.mark.skipif(os.name == "nt", reason="':' filenames are unsupported on Windows")
+    @pytest.mark.parametrize("layer_kind", ["project", "preset", "extension"])
+    def test_legacy_colon_name_preserves_resolution_without_lookup_id(
+        self, tmp_path, layer_kind
+    ):
+        project = _make_project(tmp_path)
+        name = "legacy:name"
+
+        if layer_kind == "project":
+            candidate = (
+                project / ".specify" / "templates" / "overrides" / f"{name}.md"
+            )
+            candidate.parent.mkdir(parents=True)
+        else:
+            pack_id = f"legacy-{layer_kind}"
+            candidate = (
+                project
+                / ".specify"
+                / f"{layer_kind}s"
+                / pack_id
+                / "templates"
+                / f"{name}.md"
+            )
+            candidate.parent.mkdir(parents=True)
+            _write_registry(project, f"{layer_kind}s", pack_id)
+        candidate.write_text("legacy", encoding="utf-8")
+
+        resolver = PresetResolver(project)
+        assert resolver.resolve(name, "template") == candidate
+        layer = next(
+            item
+            for item in resolver.collect_all_layers(name, "template")
+            if item["path"] == candidate
+        )
+        assert layer["lookupId"] is None
+
     def test_builtin_layer_preserves_resolver_provenance(self, tmp_path):
         project = _make_project(tmp_path)
         (project / "templates" / "spec-template.md").write_text("core", encoding="utf-8")
@@ -529,3 +566,134 @@ class TestNoPersistence:
         assert ":command:" not in on_disk
         assert ":template:" not in on_disk
         assert ":script:" not in on_disk
+
+
+# ---------------------------------------------------------------------------
+# `_identifier.py` review-round nits — sourceId accessor + derive_named_id
+# sentinel enforcement. Consumers must not ``.split(":")`` a lookupId
+# themselves, and the ``project``/``_`` pairing is enforced at the single
+# derivation boundary rather than at each caller.
+# ---------------------------------------------------------------------------
+
+
+class TestSourceIdFromLookupId:
+    @pytest.mark.parametrize(
+        "lookup_id, expected",
+        [
+            ("preset:speckit-core:command:speckit.plan", "speckit-core"),
+            (
+                "extension:speckit-git:hook:before_specify:speckit.git.branch",
+                "speckit-git",
+            ),
+            ("", None),
+            ("preset:foo", None),
+            ("unknown:foo:command:bar", None),
+            ("project:_:hook:evt:cmd", None),
+            ("project:foo:command:bar", None),
+            ("preset:_:command:bar", None),
+            ("extension:_:hook:before_plan:speckit.plan", None),
+        ],
+    )
+    def test_extracts_source_id_or_none(self, lookup_id, expected):
+        assert source_id_from_lookup_id(lookup_id) == expected
+
+
+class TestDeriveNamedIdSentinel:
+    @pytest.mark.parametrize(
+        "layer, source_id",
+        [
+            (PROJECT_OVERRIDE_LAYER, "other"),
+            ("preset", "_"),
+            ("extension", "_"),
+        ],
+    )
+    def test_rejects_invalid_layer_source_pairs(self, layer, source_id):
+        with pytest.raises(IdentifierComponentError):
+            derive_named_id(layer, source_id, "command", "n")
+
+    def test_project_layer_accepts_underscore_source(self):
+        assert (
+            derive_named_id(PROJECT_OVERRIDE_LAYER, "_", "command", "n")
+            == f"{PROJECT_OVERRIDE_LAYER}:_:command:n"
+        )
+
+    def test_hook_rejects_project_source_sentinel(self):
+        with pytest.raises(IdentifierComponentError):
+            derive_hook_id("extension", "_", "before_plan", "speckit.plan")
+
+
+# ---------------------------------------------------------------------------
+# Manifest-declared id wins over installed-directory name — one preset test
+# and one extension test because the two branches of ``collect_all_layers``
+# could diverge independently. Each proves ``lookupId`` on the resolved layer
+# equals the manifest contribution ``id``.
+# ---------------------------------------------------------------------------
+
+
+def _write_registry(project: Path, tier: str, pack_id: str) -> None:
+    registry = {
+        "schema_version": "1.0",
+        tier: {pack_id: {"version": "1.0.0", "priority": 10, "enabled": True}},
+    }
+    (project / ".specify" / tier / ".registry").write_text(
+        json.dumps(registry), encoding="utf-8"
+    )
+
+
+class TestManifestIdWinsOverDirectoryName:
+    def test_preset_lookup_id_uses_manifest_id_when_directory_renamed(self, tmp_path):
+        project = _make_project(tmp_path)
+        dir_name, manifest_id = "renamed-preset", "original-preset"
+        pack_dir = project / ".specify" / "presets" / dir_name
+        (pack_dir / "templates").mkdir(parents=True)
+        (pack_dir / "templates" / "spec-template.md").write_text("p", encoding="utf-8")
+        data = _preset_data(manifest_id)
+        data["provides"] = {
+            "templates": [
+                {"type": "template", "name": "spec-template", "file": "templates/spec-template.md"}
+            ]
+        }
+        _write_manifest(pack_dir, data, "preset.yml")
+        _write_registry(project, "presets", dir_name)
+
+        layers = PresetResolver(project).collect_all_layers("spec-template", "template")
+        layer = next(L for L in layers if L["source"].startswith(dir_name))
+        manifest = PresetManifest(pack_dir / "preset.yml")
+        assert layer["lookupId"] == manifest.contribution_id("template", "spec-template")
+        assert layer["lookupId"] == f"preset:{manifest_id}:template:spec-template"
+
+    def test_extension_lookup_id_uses_manifest_id_when_directory_renamed(
+        self, tmp_path, monkeypatch
+    ):
+        project = _make_project(tmp_path)
+        dir_name, manifest_id = "renamed-ext", "original-ext"
+        # Extension commands are auto-namespaced under speckit.<manifest_id>
+        namespaced = f"speckit.{manifest_id}.branch"
+        ext_dir = project / ".specify" / "extensions" / dir_name
+        (ext_dir / "commands").mkdir(parents=True)
+        (ext_dir / "commands" / "branch.md").write_text("e", encoding="utf-8")
+        data = _extension_data(manifest_id, with_templates=False, with_scripts=False)
+        data["provides"]["commands"] = [
+            {"name": "speckit.branch", "file": "commands/branch.md", "description": "F"}
+        ]
+        manifest_path = _write_manifest(ext_dir, data, "extension.yml")
+        _write_registry(project, "extensions", dir_name)
+
+        manifest = ExtensionManifest(manifest_path)
+        read_count = 0
+
+        def read_manifest_once(path):
+            nonlocal read_count
+            read_count += 1
+            if read_count > 1:
+                raise OSError("simulated transient second-read failure")
+            return ExtensionManifest(path)
+
+        monkeypatch.setattr(
+            "specify_cli.extensions.ExtensionManifest", read_manifest_once
+        )
+        layers = PresetResolver(project).collect_all_layers(namespaced, "command")
+        layer = next(L for L in layers if L.get("extension_id") == dir_name)
+        assert read_count == 1
+        assert layer["lookupId"] == manifest.contribution_id("command", namespaced)
+        assert layer["lookupId"] == f"extension:{manifest_id}:command:{namespaced}"
