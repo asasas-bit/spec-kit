@@ -16,7 +16,7 @@ specify artifact list --json
 | -------- | -------------------------------------------------------- |
 | `--json` | Required. Emit the inventory as a JSON array on stdout.  |
 
-Prints the full inventory of every visible artifact — one row per `(kind, name)` pair, including its composition `stack` — sorted by kind (`command`, then `template`, then `script`, then `hook`) and then by name.
+Prints the full inventory of every visible artifact — one row per `(kind, name)` pair, including its composition `stack`. Command, template, and script rows are sorted by kind and then by name. Hook rows follow those three kinds and use the hook-specific ordering described in [Sort order](#sort-order).
 
 ```json
 [
@@ -196,7 +196,7 @@ Hook rows extend the shape above with a few fields that only apply to hooks. A h
 
 | Field           | Description                                                                                     |
 | --------------- | ----------------------------------------------------------------------------------------------- |
-| `eventName`     | The event whose fires trigger this hook (`before_specify`, `after_plan`, …)                     |
+| `eventName`     | The event whose occurrence triggers this hook (`before_specify`, `after_plan`, …)               |
 | `targetCommand` | The command the hook proposes to run when the event fires                                        |
 | `registered`    | `true` when at least one matching `.specify/extensions.yml` binding is enabled                   |
 

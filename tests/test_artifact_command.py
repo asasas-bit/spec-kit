@@ -1344,8 +1344,9 @@ def _write_hook_binding(
 ) -> Path:
     """Write ``.specify/extensions.yml`` binding a hook to the given extensions.
 
-    Each ``entries`` dict must at minimum contain ``extension`` and
-    ``command`` — the schema :meth:`HookExecutor.register_hooks` writes.
+    Each ``entries`` dict must contain ``extension``. ``command`` is normally
+    present in entries written by :meth:`HookExecutor.register_hooks`, but may
+    be omitted to exercise the supported extension/event wildcard binding.
     """
     config_path = project_root / ".specify" / "extensions.yml"
     payload = {
