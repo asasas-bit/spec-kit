@@ -496,9 +496,10 @@ def _build_hook_stack(
     Contributors are re-sorted by ``(priority, insertion_index)`` — Python's
     stable sort combined with the ascending secondary key preserves the same
     "priority ascending, ties break by insertion order" behavior the runtime
-    uses (see ``HookExecutor.get_hooks_for_event``). Each entry's ``active``
-    flag independently reflects whether that contributor's binding is enabled;
-    multiple entries can therefore be active and execute.
+    uses (see ``HookExecutor.get_hooks_for_event``). Each entry is ``active``
+    exactly when its declaration matches an enabled runtime registration
+    returned by that method. Multiple entries can therefore be active and
+    execute. Event-time condition evaluation does not affect this flag.
     """
     from ..extensions import DEFAULT_HOOK_PRIORITY, normalize_priority
 

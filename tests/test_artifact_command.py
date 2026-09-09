@@ -1568,8 +1568,11 @@ class TestHookRegisteredFlag:
         rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
         hook_row = [row for row in rows if row["kind"] == "hook"][0]
         assert hook_row["registered"] is False
+        assert hook_row["stack"][0]["active"] is False
 
-    def test_bound_and_enabled_is_true(self, spec_kit_project: Path):
+    def test_enabled_binding_is_active_regardless_of_condition(
+        self, spec_kit_project: Path
+    ):
         _install_extension_with_hooks(
             spec_kit_project,
             "compliance",
@@ -1583,12 +1586,14 @@ class TestHookRegisteredFlag:
                     "extension": "compliance",
                     "command": "speckit.compliance.pre-check",
                     "enabled": True,
+                    "condition": "env.NEVER_SET is set",
                 }
             ],
         )
         rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
         hook_row = [row for row in rows if row["kind"] == "hook"][0]
         assert hook_row["registered"] is True
+        assert hook_row["stack"][0]["active"] is True
 
     def test_bound_but_disabled_is_false(self, spec_kit_project: Path):
         _install_extension_with_hooks(
@@ -1610,6 +1615,7 @@ class TestHookRegisteredFlag:
         rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
         hook_row = [row for row in rows if row["kind"] == "hook"][0]
         assert hook_row["registered"] is False
+        assert hook_row["stack"][0]["active"] is False
 
     def test_binding_without_command_matches(self, spec_kit_project: Path):
         _install_extension_with_hooks(
@@ -1625,6 +1631,42 @@ class TestHookRegisteredFlag:
         rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
         hook_row = [row for row in rows if row["kind"] == "hook"][0]
         assert hook_row["registered"] is True
+        assert hook_row["stack"][0]["active"] is True
+
+    def test_binding_matches_only_its_declared_command(
+        self, spec_kit_project: Path
+    ):
+        _install_extension_with_hooks(
+            spec_kit_project,
+            "compliance",
+            hooks={
+                "before_specify": [
+                    {"command": "speckit.compliance.pre-check"},
+                    {"command": "speckit.compliance.audit"},
+                ]
+            },
+        )
+        _write_hook_binding(
+            spec_kit_project,
+            "before_specify",
+            entries=[
+                {
+                    "extension": "compliance",
+                    "command": "speckit.compliance.pre-check",
+                    "enabled": True,
+                }
+            ],
+        )
+
+        rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
+        hook_rows = {
+            row["targetCommand"]: row for row in rows if row["kind"] == "hook"
+        }
+
+        assert (
+            hook_rows["speckit.compliance.pre-check"]["stack"][0]["active"] is True
+        )
+        assert hook_rows["speckit.compliance.audit"]["stack"][0]["active"] is False
 
     def test_orphan_binding_does_not_create_row(self, spec_kit_project: Path):
         """A binding naming an uninstalled extension MUST NOT synthesize a row."""

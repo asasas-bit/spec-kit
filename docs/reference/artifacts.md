@@ -204,7 +204,7 @@ Hook stack entries drop `presetId`, `presetName`, `hidden`, and `manifestPath` (
 | `layer`     | Always `preset` or `extension` (never `null`, never `project`, never the built-in tier)      |
 | `sourceId`  | The contributing pack's manifest id                                                          |
 | `strategy`  | Always `"additive"` because enabled contributors all execute                                |
-| `active`    | Whether this contributor has a matching enabled runtime binding; multiple entries may be `true` |
+| `active`    | `true` exactly when this declaration matches an enabled runtime registration returned by `HookExecutor.get_hooks_for_event()`; multiple entries may be `true` |
 | `lookupId`  | The manifest identifier: `{layer}:{sourceId}:hook:{eventName}:{targetCommand}`               |
 | `priority`  | Per-contributor priority (ascending = earlier execution; falls back to the runtime default)  |
 | `optional`  | Per-contributor optional flag                                                                |
@@ -212,6 +212,8 @@ Hook stack entries drop `presetId`, `presetName`, `hidden`, and `manifestPath` (
 ### `registered` semantics
 
 `registered` reflects the project's runtime binding state under `.specify/extensions.yml` and MUST match the runtime's own execution decision. Each stack entry is independently `active` when an entry in the event's binding array (a) names that contributor via `extension`, (b) matches the command or omits it, and (c) is not explicitly `enabled: false`. Top-level `registered` is `true` when any stack entry is active. This mirrors the runtime: `HookExecutor.get_hooks_for_event` returns every enabled entry, sorted by priority.
+
+`active` describes registration state only. It does not identify a priority winner or evaluate the hook's optional event-time `condition`; condition filtering happens later in `HookExecutor.check_hooks_for_event()`.
 
 A declared hook whose contributors have **no** matching binding entry still appears in the inventory with `registered: false`. This is intentional: `artifact list --json` describes what an extension declares, and `registered` tells you whether the runtime will actually invoke it. A structurally invalid `.specify/extensions.yml` (parse error, wrong top-level type, missing `hooks:` key) is silently normalized to an empty bindings map — every declared hook then reports `registered: false` and no error is raised to callers.
 
