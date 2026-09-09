@@ -1890,6 +1890,29 @@ class TestHookRegisteredFlag:
         hook_rows = [row for row in rows if row["kind"] == "hook"]
         assert hook_rows[0]["registered"] is False
 
+    def test_unreadable_extensions_yml_degrades_to_registered_false(
+        self, spec_kit_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _install_extension_with_hooks(
+            spec_kit_project,
+            "compliance",
+            hooks={"before_specify": [{"command": "speckit.compliance.pre-check"}]},
+        )
+        config_path = spec_kit_project / ".specify" / "extensions.yml"
+        config_path.write_text("hooks: {}\n", encoding="utf-8")
+        original_read_text = Path.read_text
+
+        def read_text(path: Path, *args, **kwargs):
+            if path == config_path:
+                raise OSError("simulated unreadable runtime config")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+
+        rows = ArtifactCatalog(spec_kit_project).list_artifacts_with_stack()
+        hook_rows = [row for row in rows if row["kind"] == "hook"]
+        assert hook_rows[0]["registered"] is False
+
     def test_each_contributor_active_flag_matches_its_binding(
         self, spec_kit_project: Path
     ):

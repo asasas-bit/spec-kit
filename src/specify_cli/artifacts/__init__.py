@@ -1242,9 +1242,10 @@ class ArtifactCatalog:
         rebuild the stack for a subsequent info lookup.
 
         Registry validation raises :class:`ArtifactResolutionError` if the
-        extension registry is corrupt; a structurally-invalid
-        ``.specify/extensions.yml`` is normalized to an empty bindings map
-        by :meth:`HookExecutor.get_project_config` and produces
+        extension registry is corrupt. Consistent with the existing hook
+        runtime, an invalid or unreadable ``.specify/extensions.yml`` is
+        normalized to an empty bindings map by
+        :meth:`HookExecutor.get_project_config` and produces
         ``registered: false`` for every declared hook without raising.
         """
         _validate_project(self.project_root)
@@ -1272,12 +1273,9 @@ class ArtifactCatalog:
 
         for (event_name, command), contributions in grouped.items():
             if event_name not in enabled_hooks_by_event:
-                try:
-                    enabled_hooks_by_event[event_name] = (
-                        hook_executor.get_hooks_for_event(event_name)
-                    )
-                except (OSError, PresetError) as exc:
-                    raise ArtifactResolutionError() from exc
+                enabled_hooks_by_event[event_name] = hook_executor.get_hooks_for_event(
+                    event_name
+                )
             enabled_bindings = enabled_hooks_by_event[event_name]
             stack_entries = _build_hook_stack(
                 self.project_root, contributions, enabled_bindings

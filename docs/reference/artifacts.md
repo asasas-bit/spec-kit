@@ -234,7 +234,7 @@ Hook stack entries retain the common stack fields and add per-contributor `prior
 
 This division is consistent with Spec Kit's existing hook model: the installed extension manifest declares the hook and its defaults, while `.specify/extensions.yml` records the project's registered and enabled runtime state. Registration normally copies `priority` and `optional` from the manifest, but this artifact view does not attempt to reconcile later manual drift between those files; that broader registration concern is outside this command.
 
-A declared hook whose contributors have **no** matching binding entry still appears in the inventory with `registered: false`. This is intentional: `artifact list --json` describes what an extension declares, and `registered` tells you whether the runtime will actually invoke it. A structurally invalid `.specify/extensions.yml` (parse error, wrong top-level type, missing `hooks:` key) is silently normalized to an empty bindings map — every declared hook then reports `registered: false` and no error is raised to callers.
+A declared hook whose contributors have **no** matching binding entry still appears in the inventory with `registered: false`. This is intentional: `artifact list --json` describes what an extension declares, and `registered` tells you whether the runtime will actually invoke it. Consistent with Spec Kit's existing hook runtime, an invalid or unreadable `.specify/extensions.yml` is normalized to an empty bindings map — every declared hook then reports `registered: false` and no error is raised to callers.
 
 ### Layer invariant
 
@@ -259,6 +259,6 @@ On failure, nothing is written to stdout. A single-key JSON envelope is written 
 | `not a Spec Kit project: no .specify/ directory found` | Run outside an initialized project                             |
 | `unknown artifact <name>`                           | No artifact matches the requested name (and kind, when given) — same envelope for unknown hooks (`hook:{event}:{command}`) |
 | `ambiguous artifact <name>: matches kinds [...]`    | The bare name matches more than one kind — re-run with `--kind`   |
-| `artifact resolution failed`                        | The extension registry could not be read, or an error prevented the artifact layer stack from being collected |
+| `artifact resolution failed`                        | The extension registry could not be read, or an error prevented manifest contributions or artifact layers from being collected. Runtime hook configuration uses the tolerant behavior described above. |
 
 Exit code `2` is reserved for usage errors — a missing `--json` flag or an invalid `--kind` value (accepted: `command`, `template`, `script`, `hook`) — and emits a plain-text message on stderr rather than a JSON envelope.
