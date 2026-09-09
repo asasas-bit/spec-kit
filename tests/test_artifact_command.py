@@ -1404,8 +1404,15 @@ class TestHookInventorySurfacing:
         entry = hook_rows[0]["stack"][0]
         assert entry["layer"] == "extension"
         assert entry["sourceId"] == "compliance"
+        assert entry["presetId"] is None
+        assert entry["presetName"] is None
         assert entry["strategy"] == "additive"
         assert entry["active"] is False
+        assert entry["hidden"] is False
+        assert (
+            entry["manifestPath"]
+            == ".specify/extensions/compliance/extension.yml"
+        )
         assert entry["priority"] == 5
         assert entry["optional"] is False
         assert entry["lookupId"] == (

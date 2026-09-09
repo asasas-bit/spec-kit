@@ -139,23 +139,25 @@ class HookArtifact:
 class HookStackEntry:
     """One entry inside the ``stack`` array on a hook row.
 
-    Hook stack entries mirror the shape of :class:`StackLayer` for the fields
-    common to every artifact kind (``id``, ``layer``, ``sourceId``,
-    ``strategy``, ``active``, ``lookupId``) and add ``priority`` and
-    ``optional`` — the two per-contributor scalars that vary across the stack
-    and determine the runtime's execution order. ``strategy`` is fixed to
+    Hook stack entries preserve the common :class:`StackLayer` fields and add
+    ``priority`` and ``optional`` — the two per-contributor scalars that vary
+    across hook declarations. ``strategy`` is fixed to
     ``"additive"`` because enabled hooks from different extensions all run;
-    priority orders them but does not select a winner. Hooks are always
-    attributed to a manifest-declared contributor
-    (``preset`` or ``extension``), so ``layer``, ``sourceId``, and ``lookupId``
-    are never ``None``.
+    priority orders them but does not select a winner. ``hidden`` is therefore
+    always false. Hooks are always attributed to a manifest-declared
+    contributor (``preset`` or ``extension``), so ``layer``, ``sourceId``,
+    ``manifestPath``, and ``lookupId`` are never ``None``.
     """
 
     id: str
     layer: LayerName
     sourceId: str
+    presetId: str | None
+    presetName: str | None
     strategy: Literal["additive"]
     active: bool
+    hidden: bool
+    manifestPath: str
     lookupId: str
     priority: int
     optional: bool
@@ -165,8 +167,12 @@ class HookStackEntry:
             "id": self.id,
             "layer": self.layer,
             "sourceId": self.sourceId,
+            "presetId": self.presetId,
+            "presetName": self.presetName,
             "strategy": self.strategy,
             "active": self.active,
+            "hidden": self.hidden,
+            "manifestPath": self.manifestPath,
             "lookupId": self.lookupId,
             "priority": self.priority,
             "optional": self.optional,
@@ -448,7 +454,13 @@ def _iter_hook_contributions(
             if not contribution.get("eventName") or not contribution.get("command"):
                 continue
             counter += 1
-            yield counter, contribution
+            contribution_with_provenance = dict(contribution)
+            contribution_with_provenance["lookupId"] = contribution.get("id")
+            contribution_with_provenance["preset_id"] = pack_id
+            contribution_with_provenance["pack_dir"] = (
+                resolver.presets_dir / pack_id
+            )
+            yield counter, contribution_with_provenance
 
     ext_manager = ExtensionManager(project_root)
     for _priority, ext_id, metadata in resolver.iter_extensions_by_priority():
@@ -471,7 +483,11 @@ def _iter_hook_contributions(
             if not contribution.get("eventName") or not contribution.get("command"):
                 continue
             counter += 1
-            yield counter, contribution
+            contribution_with_provenance = dict(contribution)
+            contribution_with_provenance["lookupId"] = contribution.get("id")
+            contribution_with_provenance["extension_id"] = ext_id
+            contribution_with_provenance["extension_dir"] = ext_dir
+            yield counter, contribution_with_provenance
 
 
 def _hook_logical_name(event_name: str, command: str) -> str:
@@ -485,6 +501,7 @@ def _hook_public_id(event_name: str, command: str) -> str:
 
 
 def _build_hook_stack(
+    project_root: Path,
     grouped: list[tuple[int, dict[str, Any]]],
     enabled_bindings: list[dict[str, Any]],
 ) -> list[HookStackEntry]:
@@ -518,6 +535,17 @@ def _build_hook_stack(
         lookup_id = contribution.get("id", "")
         event_name = str(contribution.get("eventName", ""))
         command = str(contribution.get("command", ""))
+        preset_id: str | None = None
+        preset_name: str | None = None
+        if layer == "preset":
+            raw_preset_id = contribution.get("preset_id")
+            pack_dir = contribution.get("pack_dir")
+            if isinstance(raw_preset_id, str) and isinstance(pack_dir, Path):
+                preset_id = raw_preset_id
+                preset_name = _preset_display_name(pack_dir, preset_id)
+        manifest_path = _derive_manifest_path(contribution, project_root)
+        if manifest_path is None:  # pragma: no cover — validated manifest invariant
+            raise ArtifactResolutionError()
         priority = normalize_priority(
             contribution.get("priority"), DEFAULT_HOOK_PRIORITY
         )
@@ -535,8 +563,12 @@ def _build_hook_stack(
                 id=_hook_public_id(event_name, command),
                 layer=layer,  # type: ignore[arg-type]
                 sourceId=source_id,
+                presetId=preset_id,
+                presetName=preset_name,
                 strategy="additive",
                 active=active,
+                hidden=False,
+                manifestPath=manifest_path,
                 lookupId=str(lookup_id),
                 priority=priority,
                 optional=optional,
@@ -1063,7 +1095,9 @@ class ArtifactCatalog:
                 except (OSError, PresetError) as exc:
                     raise ArtifactResolutionError() from exc
             enabled_bindings = enabled_hooks_by_event[event_name]
-            stack_entries = _build_hook_stack(contributions, enabled_bindings)
+            stack_entries = _build_hook_stack(
+                self.project_root, contributions, enabled_bindings
+            )
             stack_cache[(event_name, command)] = stack_entries
             if not stack_entries:  # pragma: no cover — invariant
                 continue

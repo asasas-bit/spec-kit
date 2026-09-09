@@ -164,8 +164,12 @@ Hook rows extend the shape above with a few fields that only apply to hooks. A h
       "id": "hook:before_specify:speckit.compliance.pre-check",
       "layer": "extension",
       "sourceId": "compliance-fast",
+      "presetId": null,
+      "presetName": null,
       "strategy": "additive",
       "active": true,
+      "hidden": false,
+      "manifestPath": ".specify/extensions/compliance-fast/extension.yml",
       "lookupId": "extension:compliance-fast:hook:before_specify:speckit.compliance.pre-check",
       "priority": 5,
       "optional": false
@@ -174,8 +178,12 @@ Hook rows extend the shape above with a few fields that only apply to hooks. A h
       "id": "hook:before_specify:speckit.compliance.pre-check",
       "layer": "extension",
       "sourceId": "compliance-audit",
+      "presetId": null,
+      "presetName": null,
       "strategy": "additive",
       "active": true,
+      "hidden": false,
+      "manifestPath": ".specify/extensions/compliance-audit/extension.yml",
       "lookupId": "extension:compliance-audit:hook:before_specify:speckit.compliance.pre-check",
       "priority": 10,
       "optional": true
@@ -196,15 +204,19 @@ There are no row-level `optional` or `priority` fields because hooks do not have
 
 ### Hook stack entries
 
-Hook stack entries drop `presetId`, `presetName`, `hidden`, and `manifestPath` (all of which are meaningless for hooks) and add per-contributor `priority` and `optional`. Hooks execute additively across extensions, so priority never suppresses another declaration. The stack retains every contributor in manifest-declared priority order.
+Hook stack entries retain the common stack fields and add per-contributor `priority` and `optional`. Hooks execute additively across extensions, so priority never suppresses another declaration and `hidden` is always `false`. Extension entries use `null` for `presetId` and `presetName`; a future preset hook would populate them consistently with other preset contributions. `manifestPath` points to the manifest that declares the hook.
 
 | Field       | Description                                                                                 |
 | ----------- | -------------------------------------------------------------------------------------------- |
 | `id`        | The row-shorthand `hook:{eventName}:{targetCommand}`, identical on every entry               |
 | `layer`     | Always `preset` or `extension` (never `null`, never `project`, never the built-in tier)      |
 | `sourceId`  | The contributing pack's manifest id                                                          |
+| `presetId`  | Installed preset id for a preset declaration, otherwise `null`                              |
+| `presetName` | Preset display name for a preset declaration, otherwise `null`                             |
 | `strategy`  | Always `"additive"` because enabled contributors all execute                                |
 | `active`    | `true` exactly when this declaration matches an enabled runtime registration returned by `HookExecutor.get_hooks_for_event()`; multiple entries may be `true` |
+| `hidden`    | Always `false`; additive hook declarations do not hide one another                         |
+| `manifestPath` | Project-relative path to the manifest declaring the hook                                  |
 | `lookupId`  | The manifest identifier: `{layer}:{sourceId}:hook:{eventName}:{targetCommand}`               |
 | `priority`  | Priority declared by the contributing manifest (ascending values are registered to run earlier by default) |
 | `optional`  | Optional flag declared by the contributing manifest                                          |
